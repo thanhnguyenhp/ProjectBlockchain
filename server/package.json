@@ -1,0 +1,16 @@
+{
+  "name": "id-docs-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ipfs-http-client": "^60.0.1",
+    "multer": "^1.4.5-lts.1"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}

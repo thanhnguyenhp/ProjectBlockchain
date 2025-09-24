@@ -1,0 +1,1 @@
+const hre=require("hardhat");async function main(){const [deployer]=await hre.ethers.getSigners();const F=await hre.ethers.getContractFactory("DocumentRegistry");const reg=await F.deploy(deployer.address);await reg.waitForDeployment();console.log("DocumentRegistry:",await reg.getAddress());}main().catch(e=>{console.error(e);process.exit(1);});
