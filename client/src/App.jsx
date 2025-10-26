@@ -45,8 +45,45 @@ export default function App(){
   const [status, setStatus] = useState("");
   const [myDocs, setMyDocs] = useState([]);
 
-  const web3 = useMemo(()=> window.ethereum ? new Web3(window.ethereum) : null, []);
-  const contract = useMemo(()=> web3 ? new web3.eth.Contract(registryAbi, REGISTRY_ADDRESS) : null, [web3]);
+  // ensure web3 and contract are created when window.ethereum becomes available
+  const [web3, setWeb3] = useState(() => (window.ethereum ? new Web3(window.ethereum) : null));
+  const [contract, setContract] = useState(() => (web3 ? new web3.eth.Contract(registryAbi, REGISTRY_ADDRESS) : null));
+
+  useEffect(() => {
+    // create web3/contract if injected after initial render (e.g., MetaMask installed/connected)
+    if (window.ethereum && !web3) {
+      const w = new Web3(window.ethereum);
+      setWeb3(w);
+      setContract(new w.eth.Contract(registryAbi, REGISTRY_ADDRESS));
+    }
+
+    // handle account / chain changes
+    const handleAccounts = (accounts) => {
+      if (accounts && accounts.length) setAccount(accounts[0]);
+      else setAccount(null);
+    };
+    const handleChain = (chainIdHex) => {
+      try {
+        const chain = parseInt(chainIdHex, 16);
+        if (chain !== CHAIN_ID) alert("Chọn mạng Hardhat Local (31337) trong MetaMask");
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    if (window.ethereum && window.ethereum.on) {
+      window.ethereum.on('accountsChanged', handleAccounts);
+      window.ethereum.on('chainChanged', handleChain);
+    }
+
+    return () => {
+      if (window.ethereum && window.ethereum.removeListener) {
+        window.ethereum.removeListener('accountsChanged', handleAccounts);
+        window.ethereum.removeListener('chainChanged', handleChain);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [web3]);
 
   const connect = async () => {
     if(!window.ethereum) return alert("Cài MetaMask");
