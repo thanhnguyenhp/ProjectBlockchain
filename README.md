@@ -7,22 +7,21 @@
    npm i
    npm run node    # để nguyên
    ##
-   npm run compile
-   npm run deploy:localhost
+   cd chain
+   npx hardhat compile
+   npx hardhat run scripts/deploy.js --network localhost
    ```
    Ghi lại địa chỉ DocumentRegistry.
 3) Server:
    ```
-   cd ../server
+   cd server
    cp .env.example .env
    npm i
    npm start
    ```
 4) Client:
    ```
-   cd ../client
-   cp src/config.example.js src/config.js
-   # dán REGISTRY_ADDRESS
+   cd client
    npm i
    npm run dev
    ```

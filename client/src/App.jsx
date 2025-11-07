@@ -1,10 +1,19 @@
-import { useMemo, useState, useEffect } from "react";
+
+import { useMemo, useState, useEffect, useRef } from "react";
 import Web3 from "web3";
 import axios from "axios";
 import { registryAbi } from "./registryAbi";
 import { REGISTRY_ADDRESS, API_BASE, CHAIN_ID } from "./config.js";
+import TxActivity from "./TxActivity.jsx";
+/** ===== UI Helpers ===== */
+function cls(...xs){ return xs.filter(Boolean).join(" "); }
+const chip = (label) => (
+  <span style={{padding:"2px 8px", borderRadius:999, background:"#064e3b", fontSize:12, fontWeight:600}}>{label}</span>
+);
 
+/** ===== Domain ===== */
 const DocType = { CMND: 0, PASSPORT: 1, OTHER: 2 };
+const DocTypeLabel = ["CMND","Hộ chiếu","Khác"];
 
 async function sha256Hex(buf){
   const hash = await crypto.subtle.digest("SHA-256", buf);
@@ -17,33 +26,46 @@ async function encryptFile(file){
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const cipher = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, raw);
   const keyRaw = await crypto.subtle.exportKey("raw", key);
-  const keyB64 = u8ToB64(new Uint8Array(keyRaw));
-  const ivB64 = u8ToB64(iv);
-  const hashHex = await sha256Hex(cipher);
-  const payload = JSON.stringify({
-  iv: ivB64,
-  data: u8ToB64(new Uint8Array(cipher)), });
+  const keyB64 = btoa(Array.from(new Uint8Array(keyRaw)).map(c=>String.fromCharCode(c)).join(""));
+  const payload = JSON.stringify({ iv: Array.from(iv), data: Array.from(new Uint8Array(cipher)) });
+  const hashHex = await sha256Hex(raw);
   return { payload, keyB64, hashHex };
 }
-function u8ToB64(u8) {
-  let bin = "";
-  const CHUNK = 0x8000; // 32,768
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
+
+async function decryptToBlob(payloadJson, keyB64, name){
+  const payload = typeof payloadJson === "string" ? JSON.parse(payloadJson) : payloadJson;
+  const iv = new Uint8Array(payload.iv);
+  const keyRaw = new Uint8Array(atob(keyB64).split("").map(c=>c.charCodeAt(0)));
+  const key = await crypto.subtle.importKey("raw", keyRaw, "AES-GCM", false, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, new Uint8Array(payload.data));
+  return new Blob([plain], {type: "application/octet-stream"});
 }
+
 function hexToBytes32(hex){
-  if (hex.startsWith("0x")) hex = hex.slice(2);
+  hex = hex.replace(/^0x/,"");
+  if (hex.length > 64) throw new Error("hash too long");
   return "0x" + hex.padStart(64,"0");
 }
 
+/** ===== App ===== */
 export default function App(){
   const [account, setAccount] = useState(null);
   const [docType, setDocType] = useState(DocType.CMND);
   const [file, setFile] = useState(null);
   const [status, setStatus] = useState("");
+  const [toast, setToast] = useState(null);
+  const [lastKeyB64, setLastKeyB64] = useState("");
+  const [lastCid, setLastCid] = useState("");
   const [myDocs, setMyDocs] = useState([]);
+  const [q, setQ] = useState("");
+  const [typeFilter, setTypeFilter] = useState(-1);
+  const [onlyActive, setOnlyActive] = useState(true);
+  const [showActivity, setShowActivity] = useState(false);
+  const [page, setPage] = useState(1);
+  const pageSize = 6;
+
+  const statusRef = useRef(null);
+  useEffect(()=>{ if(toast){ const t=setTimeout(()=>setToast(null), 4000); return ()=>clearTimeout(t);} }, [toast]);
 
   // ensure web3 and contract are created when window.ethereum becomes available
   const [web3, setWeb3] = useState(() => (window.ethereum ? new Web3(window.ethereum) : null));
@@ -65,37 +87,34 @@ export default function App(){
     const handleChain = (chainIdHex) => {
       try {
         const chain = parseInt(chainIdHex, 16);
-        if (chain !== CHAIN_ID) alert("Chọn mạng Hardhat Local (31337) trong MetaMask");
-      } catch (e) {
-        // ignore
-      }
+        if (chain !== CHAIN_ID) {
+          setToast({type:"warn", msg:"Hãy chọn mạng Hardhat Local (31337) trong MetaMask."});
+        }
+      } catch {}
     };
-
-    if (window.ethereum && window.ethereum.on) {
-      window.ethereum.on('accountsChanged', handleAccounts);
-      window.ethereum.on('chainChanged', handleChain);
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", handleAccounts);
+      window.ethereum.on("chainChanged", handleChain);
     }
-
     return () => {
-      if (window.ethereum && window.ethereum.removeListener) {
-        window.ethereum.removeListener('accountsChanged', handleAccounts);
-        window.ethereum.removeListener('chainChanged', handleChain);
+      if (window.ethereum) {
+        window.ethereum.removeListener("accountsChanged", handleAccounts);
+        window.ethereum.removeListener("chainChanged", handleChain);
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [web3]);
 
   const connect = async () => {
-    if(!window.ethereum) return alert("Cài MetaMask");
-    const accs = await window.ethereum.request({method:"eth_requestAccounts"});
-    setAccount(accs[0]);
+    if (!window.ethereum) return alert("Cài MetaMask trước");
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    setAccount(accounts[0]);
     const chain = parseInt(await window.ethereum.request({method:"eth_chainId"}),16);
-    if(chain !== CHAIN_ID) alert("Chọn mạng Hardhat Local (31337)");
+    if(chain !== CHAIN_ID) setToast({type:"warn", msg:"Chọn mạng Hardhat Local (31337)."});
   };
 
   const uploadAndRegister = async () => {
-    if(!file) return alert("Chọn file CMND/hộ chiếu");
-    if(!contract || !account) return alert("Kết nối ví trước");
+    if(!file) return setToast({type:"error", msg:"Chọn file CMND/hộ chiếu"});
+    if(!contract || !account) return setToast({type:"error", msg:"Kết nối ví trước"});
 
     setStatus("Mã hoá...");
     const { payload, keyB64, hashHex } = await encryptFile(file);
@@ -104,14 +123,28 @@ export default function App(){
     const form = new FormData();
     form.append("file", new Blob([payload], { type: "application/json" }), file.name + ".cipher.json");
     const up = await axios.post(`${API_BASE}/ipfs/add`, form);
+
     const cid = up.data.cid;
 
     setStatus("Ghi on-chain...");
-    const tx = await contract.methods.addDocument(docType, cid, hexToBytes32(hashHex)).send({ from: account });
+    await contract.methods.addDocument(docType, cid, hexToBytes32(hashHex)).send({ from: account });
 
-    setStatus(`Hoàn tất! CID: ${cid}. KHÓA GIẢI MÃ (lưu ngay): ${keyB64}`);
-    alert(`Lưu khóa bí mật để giải mã file sau này:\n${keyB64}`);
+    setStatus("");
+    setToast({type:"success", msg:"Tải lên thành công! ĐÃ TẠO TÀI LIỆU."});
+    setLastKeyB64(keyB64);
+    setLastCid(cid);
+    await refreshList();
+    setFile(null);
   };
+
+  function promptCopy(title, text){
+    const ok = confirm(`${title}\n\n${text}\n\nBấm OK để sao chép vào clipboard.`);
+    if(ok){
+      navigator.clipboard.writeText(text).then(()=>{
+        setToast({type:"success", msg:"Đã sao chép khoá giải mã."});
+      }).catch(()=>{});
+    }
+  }
 
   const refreshList = async ()=>{
     if(!contract || !account) return;
@@ -120,249 +153,253 @@ export default function App(){
       const d = await contract.methods.get(id).call();
       return { id, ...d, docType: Number(d.docType) };
     }));
+    rows.sort((a,b)=> Number(b.createdAt) - Number(a.createdAt));
     setMyDocs(rows);
   };
 
-  const revoke = async (id)=>{
-    await contract.methods.revoke(id).send({ from: account });
-    await refreshList();
-  };
-
-  const revokeAll = async () => {
-    if (!myDocs.length) return;
-    if (!window.confirm("Bạn có chắc muốn vô hiệu toàn bộ tài liệu?")) return;
-    for (const d of myDocs) {
-      if (d.active) {
-        await contract.methods.revoke(d.id).send({ from: account });
-      }
-    }
-    await refreshList();
-  };
-
-  const downloadAndDecrypt = async (cid)=>{
-    const keyB64 = prompt("Dán khóa giải mã (đã lưu khi upload):");
+  const downloadAndDecrypt = async (cid) => {
+    const keyB64 = prompt("Nhập KHÓA GIẢI MÃ đã lưu khi tải lên:");
     if(!keyB64) return;
-    const keyRaw = Uint8Array.from(atob(keyB64), c => c.charCodeAt(0));
-    const key = await crypto.subtle.importKey("raw", keyRaw, {name:"AES-GCM"}, true, ["decrypt"]);
-    const { data } = await axios.get(`${API_BASE}/ipfs/cat/${cid}`);
-    const iv = Uint8Array.from(atob(data.iv), c => c.charCodeAt(0));
-    const cipher = Uint8Array.from(atob(data.data), c => c.charCodeAt(0));
-    const plain = await crypto.subtle.decrypt({name:"AES-GCM", iv}, key, cipher);
-    const blob = new Blob([plain], { type: "application/octet-stream" });
+    const res = await axios.get(`${API_BASE}/ipfs/cat/${cid}`);
+    const blob = await decryptToBlob(res.data, keyB64, "document");
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "decrypted.bin"; a.click();
+    const a = document.createElement("a");
+    a.href = url; a.download = "document";
+    a.click();
     URL.revokeObjectURL(url);
   };
 
-  useEffect(() => {
-    if (account) refreshList();
-    // eslint-disable-next-line
-  }, [account]);
+const revoke = async (id) => {
+  if (!confirm("Vô hiệu hoá tài liệu này?")) return;
+  try {
+    // bắt lỗi sớm
+    await contract.methods.revoke(id).estimateGas({ from: account });
+
+    const receipt = await contract.methods.revoke(id).send({ from: account });
+    if (receipt.status) {
+      setToast({ type:"success", msg:"Đã vô hiệu" });
+      await refreshList();
+    } else {
+      setToast({ type:"error", msg:"Tx failed" });
+    }
+  } catch (e) {
+    const msg = e?.data?.message || e?.error?.message || e?.message || "Tx failed";
+    setToast({ type:"error", msg });
+  }
+};
+
+
+  useEffect(()=>{ refreshList(); }, [contract, account]);
+
+  const filtered = useMemo(()=>{
+    let rows = myDocs;
+    if(q.trim()){
+      const t = q.toLowerCase();
+      rows = rows.filter(r => r.cid.toLowerCase().includes(t) || (r.owner?.toLowerCase()?.includes(t)));
+    }
+    if(typeFilter !== -1) rows = rows.filter(r => r.docType === typeFilter);
+    if(onlyActive) rows = rows.filter(r => r.active);
+    return rows;
+  }, [myDocs, q, typeFilter, onlyActive]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageRows = filtered.slice((page-1)*pageSize, page*pageSize);
 
   return (
-    <div
+    <div style={{ fontFamily:"Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif", background:"#0b1220", minHeight:"100vh", color:"#e2e8f0" }}>
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "32px 16px" }}>
+        {/* Header */}
+        <header style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom: 24 }}>
+          <div>
+            <h1 style={{ fontSize: 28, margin:0, fontWeight:800, letterSpacing:0.3 }}>Quản lý giấy tờ cá nhân</h1>
+            <div style={{opacity:0.8, marginTop:6}}>Lưu trữ an toàn: IPFS + mã hoá AES‑GCM + ghi nhận Ethereum.</div>
+          </div>
+          <div>
+       {account ? (
+              <div style={{display:"flex", gap:8, alignItems:"center"}}>
+                <button
+                  style={{background:"#1f2937", color:"#e5e7eb", border:"1px solid #334155", padding:"10px 14px", borderRadius:10}}
+                  title={account}
+                >
+      {chip(account.slice(0,6)+"…"+account.slice(-4))}
+    </button>
+    <button
+      onClick={()=>setShowActivity(v=>!v)}
       style={{
-        maxWidth: 900,
-        margin: "32px auto",
-        fontFamily: "Segoe UI, system-ui, sans-serif",
-        background: "#f8fafc",
-        borderRadius: 16,
-        boxShadow: "0 4px 24px #0001",
-        padding: 32,
+        background: showActivity ? "#2563eb" : "#111827",
+        color:"#e5e7eb",
+        border:"1px solid #334155",
+        padding:"10px 12px",
+        borderRadius:10,
+        fontWeight:600,
+        transition:"all .2s"
       }}
     >
-      <h1 style={{ color: "#2563eb", fontWeight: 700, letterSpacing: 1 }}>
-        Quản lý giấy tờ{" "}
-        <span style={{ fontWeight: 400, color: "#64748b" }}>(CMND/Hộ chiếu)</span>
-        <span style={{ fontSize: 18, color: "#94a3b8" }}> — IPFS + Ethereum</span>
-      </h1>
-      {account ? (
-        <p style={{ color: "#059669", fontWeight: 500 }}>
-          Đã kết nối: <b>{account}</b>
-        </p>
-      ) : (
-        <button
-          onClick={connect}
-          style={{
-            background: "#2563eb",
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            padding: "10px 24px",
-            fontWeight: 600,
-            cursor: "pointer",
-            boxShadow: "0 2px 8px #2563eb22",
-          }}
-        >
-          Kết nối MetaMask
-        </button>
-      )}
+      {showActivity ? "Ẩn lịch sử" : "Lịch sử hoạt động"}
+    </button>
+  </div>
+) : (
+       <button onClick={connect} style={{background:"#22c55e", color:"#08211b", border:"none", padding:"10px 16px", borderRadius:10, fontWeight:700, boxShadow:"0 2px 8px rgba(0,0,0,.3)"}}>
+           Kết nối ví
+      </button>
+            )}
+      </div>
+      </header>
 
-      <section
-        style={{
-          marginTop: 24,
-          padding: 20,
-          border: "1px solid #e0e7ef",
-          borderRadius: 12,
-          background: "#fff",
-          boxShadow: "0 2px 8px #0001",
-        }}
-      >
-        <h2 style={{ color: "#0ea5e9", fontWeight: 600 }}>Tải lên & đăng ký</h2>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
-          <select
-            value={docType}
-            onChange={e => setDocType(Number(e.target.value))}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid #cbd5e1",
-              fontSize: 15,
-              background: "#f1f5f9",
-            }}
-          >
+      {/* Upload Card */}
+      <section style={{ background:"#0f172a", border:"1px solid #1f2a44", borderRadius:16, padding:16, marginBottom:20, boxShadow:"0 4px 20px rgba(0,0,0,.25)" }}>
+        <h2 style={{ fontSize:20, margin:0, marginBottom:10, fontWeight:700, color:"#93c5fd" }}>Tải lên & đăng ký</h2>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr auto", gap:12, alignItems:"center" }}>
+           <select value={docType} onChange={e=>setDocType(Number(e.target.value))}
+              style={{padding:"10px 12px", borderRadius:10, border:"1px solid #334155", background:"#111827", color:"#e5e7eb"}}>
+              <option value={0}>CMND</option>
+              <option value={1}>Hộ chiếu</option>
+              <option value={2}>Khác</option>
+            </select>
+            <input type="file" onChange={e=>setFile(e.target.files?.[0]||null)}
+              style={{padding:"10px", borderRadius:10, border:"1px solid #334155", background:"#0b1220", color:"#e5e7eb"}}/>
+            <button onClick={uploadAndRegister}
+              style={{background:"#3b82f6", color:"#fff", border:"none", borderRadius:12, padding:"10px 16px", fontWeight:700}}>
+              Tải lên
+            </button>
+          </div>
+          {status && (
+            <div ref={statusRef} style={{marginTop:12, fontSize:14, opacity:.9}}>
+              ⏳ {status}
+            </div>
+          )}
+
+          {lastKeyB64 && (
+            <div style={{marginTop:12, border:"1px solid #f59e0b", background:"#1f2937", color:"#fde68a", padding:12, borderRadius:10}}>
+              <div style={{fontWeight:800, marginBottom:6}}>KHÓA GIẢI MÃ (LƯU NGAY)</div>
+              <div style={{fontSize:13, wordBreak:"break-all"}}>CID: {lastCid}</div>
+              <div style={{fontSize:13, wordBreak:"break-all"}}>KEY: {lastKeyB64}</div>
+              <div style={{display:"flex", gap:8, marginTop:10}}>
+                <button onClick={()=>navigator.clipboard.writeText(lastKeyB64).then(()=>setToast({type:"success", msg:"Đã copy khoá"}))} style={{background:"#3b82f6", color:"#fff", border:"none", borderRadius:10, padding:"8px 12px", fontWeight:700}}>Copy khóa</button>
+                <button onClick={()=>{setLastKeyB64(""); setLastCid("");}} style={{background:"#0b1220", color:"#e5e7eb", border:"1px solid #334155", borderRadius:10, padding:"8px 12px"}}>Đã lưu xong</button>
+              </div>
+              <div style={{opacity:.9, fontSize:12, marginTop:8}}>⚠️ Khóa KHÔNG được lưu lại trên server hay blockchain. Hãy cất giữ an toàn (password manager).</div>
+            </div>
+          )}
+        </section>
+
+        {/* Filters */}
+        <section style={{ display:"grid", gridTemplateColumns:"1fr auto auto auto", gap:10, alignItems:"center", marginBottom:10 }}>
+          <input placeholder="Tìm theo CID hoặc Owner..." value={q} onChange={e=>{setPage(1); setQ(e.target.value);}}
+            style={{padding:"10px 12px", borderRadius:10, border:"1px solid #334155", background:"#0b1220", color:"#e5e7eb"}}/>
+          <select value={typeFilter} onChange={e=>{setPage(1); setTypeFilter(Number(e.target.value));}}
+            style={{padding:"10px 12px", borderRadius:10, border:"1px solid #334155", background:"#0b1220", color:"#e5e7eb"}}>
+            <option value={-1}>Tất cả loại</option>
             <option value={0}>CMND</option>
             <option value={1}>Hộ chiếu</option>
             <option value={2}>Khác</option>
           </select>
-          <input
-            type="file"
-            onChange={e => setFile(e.target.files?.[0] || null)}
-            style={{
-              padding: "8px",
-              borderRadius: 8,
-              border: "1px solid #cbd5e1",
-              background: "#f8fafc",
-            }}
-          />
-          <button
-            onClick={uploadAndRegister}
-            style={{
-              background: "#0ea5e9",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 20px",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "background 0.2s",
-            }}
-          >
-            Mã hoá → IPFS → Ghi on-chain
-          </button>
-        </div>
-        <p style={{ color: "#f59e42", marginTop: 8 }}>{status}</p>
-      </section>
+          <label style={{display:"flex", gap:8, alignItems:"center"}}>
+            <input type="checkbox" checked={onlyActive} onChange={e=>{setPage(1); setOnlyActive(e.target.checked);}}/>
+            Chỉ hiển thị đang hiệu lực
+          </label>
+          <button onClick={refreshList} style={{background:"#111827", color:"#e5e7eb", border:"1px solid #334155", padding:"10px 12px", borderRadius:10}}>Làm mới</button>
+        </section>
 
-      <section
-        style={{
-          marginTop: 24,
-          padding: 20,
-          border: "1px solid #e0e7ef",
-          borderRadius: 12,
-          background: "#fff",
-          boxShadow: "0 2px 8px #0001",
-        }}
-      >
-        <h2 style={{ color: "#0ea5e9", fontWeight: 600 }}>Tài liệu của tôi</h2>
-        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-          <button
-            onClick={refreshList}
+        {/* List */}
+        <section style={{ background:"#0f172a", border:"1px solid #1f2a44", borderRadius:16, padding:16 }}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10}}>
+            <h3 style={{margin:0}}>Tài liệu của tôi ({filtered.length})</h3>
+            <div>{chip("Trang "+page+" / "+totalPages)}</div>
+          </div>
+
+          <ul style={{ listStyle:"none", padding:0, margin:0, display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", gap:12 }}>
+            {pageRows.map(d => (
+              <li key={d.id} style={{background:"#0b1220", border:"1px solid #334155", borderRadius:14, padding:14}}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
+                  <strong style={{fontSize:16}}>{DocTypeLabel[d.docType]||"—"}</strong>
+                  <span>{d.active ? chip("Active") : chip("Revoked")}</span>
+                </div>
+                <div
+                    style={{
+                      fontSize: 13,
+                      opacity: 0.9,
+                      display: "grid",
+                      gap: 4,
+                      wordBreak: "break-all",
+                      lineHeight: "1.4em",
+                      background: "#0b1220",
+                      padding: "6px 8px",
+                      borderRadius: 8,
+                      border: "1px solid #1e293b",
+                    }}
+              >
+              <div><b style={{ color: "#93c5fd" }}>CID:</b> <span style={{ color: "#e2e8f0" }}>{d.cid}</span></div>
+              <div><b style={{ color: "#93c5fd" }}>Owner:</b> <span style={{ color: "#e2e8f0" }}>{d.owner.slice(0, 10)}…</span></div>
+              <div><b style={{ color: "#93c5fd" }}>Date:</b> <span style={{ color: "#e2e8f0" }}>{d.createdAt ? new Date(Number(d.createdAt) * 1000).toLocaleString() : "—"}</span></div>
+            </div>
+
+                <div style={{display:"flex", gap:8, marginTop:10}}>
+                  <button onClick={()=>downloadAndDecrypt(d.cid)} style={{background:"#3b82f6", color:"#fff", border:"none", borderRadius:10, padding:"8px 12px", fontWeight:600}}>Tải & giải mã</button>
+                  {d.active && (
+                    <button onClick={()=>revoke(d.id)} style={{background:"#ef4444", color:"#fff", border:"none", borderRadius:10, padding:"8px 12px", fontWeight:600}}>Vô hiệu</button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+
+          {/* Pagination */}
+          <div style={{display:"flex", justifyContent:"center", gap:8, marginTop:14}}>
+            <button disabled={page<=1} onClick={()=>setPage(p=>Math.max(1,p-1))} style={{padding:"8px 12px", borderRadius:10, border:"1px solid #334155", background:"#0b1220", color:"#e5e7eb"}}>Trước</button>
+            <button disabled={page>=totalPages} onClick={()=>setPage(p=>Math.min(totalPages,p+1))} style={{padding:"8px 12px", borderRadius:10, border:"1px solid #334155", background:"#0b1220", color:"#e5e7eb"}}>Sau</button>
+          </div>
+        </section>
+
+        {/* Toast */}
+        {toast && (
+          <div style={{position:"fixed", right:16, bottom:16, background:"#111827", border:"1px solid #334155", color:"#e5e7eb", borderRadius:12, padding:"10px 14px", boxShadow:"0 8px 30px rgba(0,0,0,.4)"}}>
+            {toast.msg}
+          </div>
+        )}
+        { showActivity && (
+          <div
             style={{
-              background: "#2563eb",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              padding: "8px 18px",
-              fontWeight: 500,
-              cursor: "pointer",
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.5)",
+              zIndex: 1000,
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center"
             }}
           >
-            Làm mới danh sách
-          </button>
-          <button
-            onClick={revokeAll}
-            style={{
-              background: "#ef4444",
-              color: "#fff",
-              border: "none",
-              borderRadius: 8,
-              padding: "8px 18px",
-              fontWeight: 500,
-              cursor: "pointer",
-            }}
-            disabled={!myDocs.some(d => d.active)}
-          >
-            Xóa toàn bộ
-          </button>
-        </div>
-        <ul style={{ listStyle: "none", padding: 0 }}>
-          {myDocs.map((d, i) => (
-            <li
-              key={i}
+            <div
               style={{
-                margin: "12px 0",
-                padding: "14px 18px",
-                borderRadius: 10,
-                background: "#f1f5f9",
-                boxShadow: "0 1px 4px #0001",
-                border: d.active ? "2px solid #22c55e" : "2px solid #e5e7eb",
-                transition: "border 0.2s",
+                background: "#0f172a",
+                border: "1px solid #1f2a44",
+                borderRadius: 16,
+                width: "min(900px, 95vw)",
+                maxHeight: "85vh",
+                overflowY: "auto",
+                padding: 16,
+                boxShadow: "0 8px 30px rgba(0,0,0,.5)"
               }}
             >
-              <div style={{ fontSize: 15, marginBottom: 4 }}>
-                <code style={{ color: "#64748b" }}>{d.id}</code> — loại{" "}
-                 <b>{(["CMND", "Hộ chiếu", "Khác"][Number(d.docType)] ?? "Khác")}</b>{" "}
-                — CID{" "}
-                <a
-                  href={`https://gateway.pinata.cloud/ipfs/${d.cid}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "#2563eb", textDecoration: "underline" }}
-                >
-                  {d.cid}
-                </a>{" "}
-                — trạng thái:{" "}
-                <span style={{ color: d.active ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
-                  {d.active ? "Đang hoạt động" : "Đã vô hiệu"}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+              <TxActivity web3={web3} contract={contract} account={account} />
+              <div style={{ textAlign: "right", marginTop: 8 }}>
                 <button
-                  onClick={() => downloadAndDecrypt(d.cid)}
+                  onClick={() => setShowActivity(false)}
                   style={{
-                    background: "#0ea5e9",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: 8,
-                    padding: "8px 16px",
-                    fontWeight: 500,
-                    cursor: "pointer",
+                    background: "#111827",
+                    color: "#e5e7eb",
+                    border: "1px solid #334155",
+                    padding: "8px 12px",
+                    borderRadius: 10
                   }}
                 >
-                  Tải & giải mã
+                  Đóng
                 </button>
-                {d.active && (
-                  <button
-                    onClick={() => revoke(d.id)}
-                    style={{
-                      background: "#ef4444",
-                      color: "#fff",
-                      border: "none",
-                      borderRadius: 8,
-                      padding: "8px 16px",
-                      fontWeight: 500,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Vô hiệu
-                  </button>
-                )}
               </div>
-            </li>
-          ))}
-        </ul>
-      </section>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

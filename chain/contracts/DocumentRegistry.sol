@@ -11,7 +11,15 @@ contract DocumentRegistry is Ownable {
     constructor(address owner_) Ownable(owner_) {}
     function _makeId(address owner, uint8 docType, string memory cid, bytes32 fileHash) internal view returns (bytes32) { return keccak256(abi.encode(owner, docType, cid, fileHash, block.timestamp)); }
     function addDocument(uint8 docType, string calldata cid, bytes32 fileHash) external returns (bytes32 id) { id=_makeId(msg.sender,docType,cid,fileHash); require(docs[id].owner==address(0),"exists"); docs[id]=Doc({owner:msg.sender,docType:docType,cid:cid,fileHash:fileHash,createdAt: uint64(block.timestamp),active:true}); byOwner[msg.sender].push(id); emit DocumentAdded(id,msg.sender,docType,cid,fileHash);} 
-    function revoke(bytes32 id) external { Doc storage d=docs[id]; require(d.owner==msg.sender,"not owner"); d.active=false; emit DocumentRevoked(id,msg.sender);} 
+    function revoke(bytes32 id) external {
+    Doc storage d = docs[id];
+    require(d.owner != address(0), "not found");   // <-- thêm
+    require(d.owner == msg.sender, "not owner");   // (giữ nguyên)
+    require(d.active, "already revoked");          // <-- thêm
+    d.active = false;
+    emit DocumentRevoked(id, msg.sender);
+    }
+ 
     function get(bytes32 id) external view returns (Doc memory) { return docs[id]; }
     function listIds(address owner) external view returns (bytes32[] memory) { return byOwner[owner]; }
 }

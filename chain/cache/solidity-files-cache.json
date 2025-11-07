@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "D:\\Quản lý giấy tờ\\chain\\contracts\\DocumentRegistry.sol": {
-      "lastModificationDate": 1757082956726,
-      "contentHash": "de1b72b29ea58354df9b07c29f097081",
+      "lastModificationDate": 1762451370849,
+      "contentHash": "046c4e3832789eee3e05b06affce1478",
       "sourceName": "contracts/DocumentRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",

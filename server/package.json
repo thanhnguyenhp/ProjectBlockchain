@@ -8,9 +8,15 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "ipfs-http-client": "^60.0.1",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "mongoose": "^8.5.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "morgan": "^1.10.0",
+    "cookie-parser": "^1.4.6"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --env-file=.env index.js"
   }
 }
