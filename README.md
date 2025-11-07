@@ -26,4 +26,7 @@
    npm i
    npm run dev
    ```
-Dùng MetaMask (mạng 31337), chọn file → mã hoá → upload IPFS → ghi on-chain. Lưu **khóa giải mã** hiển thị sau khi upload.
+5) Cần phải có IPFS, MetaMark
+6) 
+<img width="1270" height="883" alt="image" src="https://github.com/user-attachments/assets/18e307b7-e0f3-4406-85c0-36d1fea74a06" />
+
